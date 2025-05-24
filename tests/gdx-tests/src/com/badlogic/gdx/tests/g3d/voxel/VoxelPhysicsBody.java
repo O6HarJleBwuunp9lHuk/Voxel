@@ -14,11 +14,15 @@ public class VoxelPhysicsBody {
     public int color;
     public Vector3 position;
     public btRigidBody body;
+    private boolean isDynamic;
+    private boolean isActive = false;
 
     public VoxelPhysicsBody(Vector3 position, byte voxelType, int color, VoxelWorld world) {
         this.position = position;
         this.voxelType = voxelType;
         this.color = color;
+        this.isDynamic = false;
+        makeStatic();
 
         btCollisionShape shape = new btBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
         btMotionState motionState = new btDefaultMotionState();
@@ -33,4 +37,29 @@ public class VoxelPhysicsBody {
 
         world.addPhysicsBody(this.body);
     }
+
+    public void makeDynamic() {
+        if (!isDynamic) {
+            body.setMassProps(0.5f, new Vector3()); // Устанавливаем массу
+            body.setActivationState(Collision.DISABLE_DEACTIVATION);
+            isDynamic = true;
+        }
+    }
+
+    public void makeActive() {
+        if (!isActive) {
+            // Делаем тело динамическим только при активации (попадании)
+            body.setMassProps(0.5f, new Vector3());
+            body.setActivationState(Collision.DISABLE_DEACTIVATION);
+            isActive = true;
+        }
+    }
+
+    public void makeStatic() {
+        if (isActive) {
+            body.setMassProps(0f, new Vector3());
+            isActive = false;
+        }
+    }
 }
+

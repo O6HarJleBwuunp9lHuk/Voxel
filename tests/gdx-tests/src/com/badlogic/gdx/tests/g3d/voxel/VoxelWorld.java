@@ -10,6 +10,9 @@ import com.badlogic.gdx.graphics.g3d.Renderable;
 import com.badlogic.gdx.graphics.g3d.RenderableProvider;
 import com.badlogic.gdx.math.Matrix4;
 import com.badlogic.gdx.math.Vector3;
+import com.badlogic.gdx.physics.bullet.linearmath.btDefaultMotionState;
+import com.badlogic.gdx.physics.bullet.linearmath.btMotionState;
+import com.badlogic.gdx.physics.bullet.linearmath.btVector3;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.Pool;
 import com.badlogic.gdx.physics.bullet.Bullet;
@@ -21,6 +24,8 @@ public class VoxelWorld implements RenderableProvider {
 	public static final int CHUNK_SIZE_X = 16;
 	public static final int CHUNK_SIZE_Y = 16;
 	public static final int CHUNK_SIZE_Z = 16;
+
+    public static final float WORLD_SCALE = 1f;
 
 	public final VoxelChunk[] chunks;
 	public final Mesh[] meshes;
@@ -52,15 +57,18 @@ public class VoxelWorld implements RenderableProvider {
 	public int renderedChunks;
 	public int numChunks;
 
+
+
 	public final int[] palette = new int[256];
 	public boolean useColors = false;
-	private final int[][][] voxelColors;
+	final int[][][] voxelColors;
 
     private btCollisionConfiguration collisionConfig;
     private btDispatcher dispatcher;
     private btBroadphaseInterface broadphase;
     private btConstraintSolver solver;
     public btDynamicsWorld dynamicsWorld;
+    float mass;
 
 
 
@@ -80,6 +88,7 @@ public class VoxelWorld implements RenderableProvider {
 		this.dirty = new boolean[numChunks];
 		this.numVertices = new int[numChunks];
 		this.voxelColors = new int[voxelsX][voxelsY][voxelsZ];
+        float mass = 0f;
 
 
 
@@ -106,13 +115,14 @@ public class VoxelWorld implements RenderableProvider {
         solver = new btSequentialImpulseConstraintSolver();
         dynamicsWorld = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
         dynamicsWorld.setGravity(new Vector3(0, -9.8f, 0));
+        //dynamicsWorld.setContactListener(new VoxelContactListener(this));
         //dynamicsWorld.addRigidBody(groundBody, STATIC_GROUP, PROJECTILE_MASK);
         btBoxShape groundShape = new btBoxShape(new Vector3(100, 1, 100));
         btRigidBody.btRigidBodyConstructionInfo groundInfo =
             new btRigidBody.btRigidBodyConstructionInfo(0, null, groundShape);
 
         btRigidBody ground = new btRigidBody(groundInfo);
-        ground.setWorldTransform(new Matrix4().setToTranslation(0, -5, 0));
+        ground.setWorldTransform(new Matrix4().setToTranslation(0, 0, 0));
         ground.setUserValue(VoxelWorld.GROUND_MARKER);
         ground.setUserPointer(System.nanoTime());// Маркер для земли
 
@@ -124,6 +134,88 @@ public class VoxelWorld implements RenderableProvider {
 
     public void update(float deltaTime) {
         dynamicsWorld.stepSimulation(deltaTime);
+        checkProjectileCollisions();
+
+       // VoxelContactListener callback = new VoxelContactListener(this);
+        //dynamicsWorld.contactTest(callback);
+        //callback.dispose();
+    }
+
+    public void checkProjectileCollisions() {
+        // Получаем все объекты в мире
+        btCollisionObjectArray objects = dynamicsWorld.getCollisionObjectArray();
+
+        // Собираем снаряды и воксели в отдельные списки
+        Array<btRigidBody> projectiles = new Array<>();
+        Array<btRigidBody> voxels = new Array<>();
+
+        for (int i = 0; i < objects.size(); i++) {
+            btCollisionObject obj = objects.atConst(i);
+            int userValue = obj.getUserValue();
+            //System.out.println("Object " + i + " has userValue: " + userValue);
+            if (obj.getUserValue() == PROJECTILE_MARKER) {
+                projectiles.add((btRigidBody)obj);
+            } else if (obj.getUserValue() == VOXEL_MARKER) {
+                voxels.add((btRigidBody)obj);
+            }
+        }
+        System.out.println(projectiles.size);
+        System.out.println(voxels.size);
+
+        // Проверяем столкновения между снарядами и вокселями
+        for (btRigidBody projectile : projectiles) {
+            for (btRigidBody voxel : voxels) {
+                if (checkObjectsCollision(projectile, voxel)) {
+                    handleCollision(projectile, voxel);
+                    break; // Обрабатываем только одно столкновение за кадр
+                }
+            }
+        }
+    }
+
+    private boolean checkObjectsCollision(btRigidBody obj1, btRigidBody obj2) {
+        // Получаем позиции объектов
+        Vector3 pos1 = new Vector3();
+        Vector3 pos2 = new Vector3();
+        Matrix4 transform = new Matrix4();
+        obj1.getWorldTransform(transform);
+        pos1 = transform.getTranslation(new Vector3());
+        obj2.getWorldTransform(transform);
+        pos2 = transform.getTranslation(new Vector3());
+
+
+        // Простая проверка расстояния (можно улучшить)
+        float distance = pos1.dst(pos2);
+        float collisionDistance = WORLD_SCALE * 1.5f; // Эмпирическое значение
+
+        return distance < collisionDistance;
+    }
+
+    private void handleCollision(btRigidBody projectile, btRigidBody voxel) {
+        // Получаем данные вокселя
+        VoxelData data = decodeVoxelData(voxel.getUserPointer());
+
+        // Получаем скорость снаряда
+        Vector3 projectileVel = new Vector3();
+        projectileVel = projectile.getLinearVelocity();
+
+        // Вычисляем направление и силу удара
+        Vector3 hitDirection = projectileVel.cpy().nor();
+        float forceMagnitude = projectileVel.len() * 5f; // Усиливаем эффект
+
+        // Применяем импульс к вокселю
+        Vector3 impulse = hitDirection.scl(forceMagnitude);
+        voxel.applyCentralImpulse(impulse);
+
+        // Делаем воксель динамическим (если он был статичным)
+        voxel.setMassProps(1f, new Vector3()); // Масса 1
+        voxel.setActivationState(Collision.ACTIVE_TAG);
+
+        // Удаляем снаряд
+        //removeBody(projectile);
+
+        System.out.printf("Voxel at [%d,%d,%d] hit with force %.2f\n",
+            data.x, data.y, data.z, forceMagnitude);
     }
 
     public void addPhysicsBody(btRigidBody body) {
@@ -182,28 +274,81 @@ public class VoxelWorld implements RenderableProvider {
 		this.vertices = new float[(7) * 6 * CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z];
 	}
 
-	public void setVoxelWithColor(int x, int y, int z, byte voxelType, int color) {
-		if (x < 0 || x >= voxelsX || y < 0 || y >= voxelsY || z < 0 || z >= voxelsZ) {
-			return;
-		}
-		voxelColors[x][y][z] = color;
+    public void setVoxelWithColor(int x, int y, int z, byte voxelType, int color) {
+        if (x < 0 || x >= voxelsX || y < 0 || y >= voxelsY || z < 0 || z >= voxelsZ) return;
+
+        removeVoxelBody(x, y, z); // Удаляем старое тело если было
+
+        if (voxelType != 0) {
+            btBoxShape shape = new btBoxShape(new Vector3(0.5f, 0.5f, 0.5f).scl(WORLD_SCALE));
+
+            btMotionState motionState = new btDefaultMotionState();
+            btRigidBody.btRigidBodyConstructionInfo info =
+                new btRigidBody.btRigidBodyConstructionInfo(1f, motionState, shape);
+
+            btRigidBody body = new btRigidBody(info);
+            Vector3 pos = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f).scl(WORLD_SCALE);
+            body.setWorldTransform(new Matrix4().setToTranslation(pos));
+
+            // Сохраняем цвет в пользовательских данных
+            body.setUserValue(VOXEL_MARKER);
+            VoxelData data = new VoxelData(color, x, y, z);
+            body.setUserPointer(encodeVoxelData(data));
+            // Дополнительно сохраняем изначальные координаты (если нужно)
+            //body.setUserPointer(hashPosition(x, y, z));
+
+            body.setRestitution(0.3f);
+            body.setFriction(0.7f);
+            body.setActivationState(Collision.DISABLE_DEACTIVATION);
+
+            addBody(body, VOXEL_GROUP, (PROJECTILE_MASK));
+        }
+        // Обновляем чанк (если используете чанковую систему)
+        updateChunkAt(x, y, z);
+    }
 
 
+    private void removeVoxelBody(int x, int y, int z) {
+        long key = hashPosition(x, y, z);
+        for (int i = 0; i < physicsBodies.size; i++) {
+            if (physicsBodies.get(i).getUserPointer() == key) {
+                btRigidBody body = physicsBodies.removeIndex(i);
+                dynamicsWorld.removeRigidBody(body);
+                body.dispose();
+                break;
+            }
+        }
+    }
 
-		int chunkX = x / CHUNK_SIZE_X;
-		int chunkY = y / CHUNK_SIZE_Y;
-		int chunkZ = z / CHUNK_SIZE_Z;
-		int chunkIndex = chunkX + chunkZ * chunksX + chunkY * chunksX * chunksZ;
+    private long encodeVoxelData(VoxelData data) {
+        return ((long)data.color << 32) |
+            ((long)data.x << 16) |
+            ((long)data.y << 8) |
+            data.z;
+    }
 
-		chunks[chunkIndex].set(
-				x % CHUNK_SIZE_X,
-				y % CHUNK_SIZE_Y,
-				z % CHUNK_SIZE_Z,
-				voxelType
-		);
+    // Декодируем данные из userPointer
+    VoxelData decodeVoxelData(long userPointer) {
+        int color = (int)(userPointer >>> 32);
+        int x = (int)((userPointer >> 16) & 0xFF);
+        int y = (int)((userPointer >> 8) & 0xFF);
+        int z = (int)(userPointer & 0xFF);
+        return new VoxelData(color, x, y, z);
+    }
 
-		dirty[chunkIndex] = true;
-	}
+    private void updateChunkAt(int x, int y, int z) {
+        int chunkX = x / CHUNK_SIZE_X;
+        int chunkY = y / CHUNK_SIZE_Y;
+        int chunkZ = z / CHUNK_SIZE_Z;
+        int chunkIndex = chunkX + chunkZ * chunksX + chunkY * chunksX * chunksZ;
+        dirty[chunkIndex] = true;
+    }
+
+    private long hashPosition(int x, int y, int z) {
+        // Используем битовые сдвиги для создания уникального хеша из координат
+        return ((long)x & 0xFFFF) << 32 | ((long)y & 0xFFFF) << 16 | ((long)z & 0xFFFF);
+    }
+
 
 	public byte get(float x, float y, float z) {
 		int ix = (int)x;
@@ -280,6 +425,14 @@ public class VoxelWorld implements RenderableProvider {
 
         // Опционально: создаем эффект разрушения (частицы, звук)
         // ...
+    }
+
+    public void setMass(float mass) {
+        mass = 1f;
+    }
+
+    public float getMass() {
+        return this.mass;
     }
 
 }
